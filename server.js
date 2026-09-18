@@ -1,14 +1,13 @@
 /**
  * VulnBank — Deliberately Insecure Express App
  *
- * PURPOSE: Demo target for the AuthTrack / Secura SAST scanner.
+ * PURPOSE: Demo target for the SecuraAI scanner.
  * Every vulnerability here is INTENTIONAL so the scanner has real targets to find.
  *
- * DO NOT deploy this to production.
+ * Runs both locally (node server.js) and on Vercel (serverless).
  */
 
 const express = require('express');
-const sqlite3 = require('sqlite3').verbose();
 const bodyParser = require('body-parser');
 const path = require('path');
 const jwt = require('jsonwebtoken');  // pinned to 8.5.1 — known CVE for OSV-Scanner to catch
@@ -16,7 +15,6 @@ const { exec } = require('child_process');
 const crypto = require('crypto');
 
 const app = express();
-const PORT = 4000;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // VULN-1: Hardcoded secrets (Gitleaks will flag these)
@@ -25,6 +23,21 @@ const JWT_SECRET        = 'hardcoded_jwt_secret_do_not_use';   // gitleaks: jwt-
 const DB_PASSWORD       = 'S3cr3tP@ssw0rd!';                  // gitleaks: password
 const AWS_ACCESS_KEY_ID = 'AKIAIOSFODNN7EXAMPLE';             // gitleaks: aws-access-key-id
 const STRIPE_KEY        = 'sk_live_DEMO_FAKE_KEY_DO_NOT_USE_1234567890'; // gitleaks: stripe-secret-key
+
+// ─────────────────────────────────────────────────────────────────────────────
+// In-memory DB (no native modules — works on Vercel serverless)
+// ─────────────────────────────────────────────────────────────────────────────
+const users = [
+  { id: 1, username: 'admin', password: 'supersecret123', role: 'admin', email: 'admin@vulnbank.local', balance: 99999 },
+  { id: 2, username: 'alice', password: 'alice1234',      role: 'user',  email: 'alice@vulnbank.local', balance: 1500  },
+  { id: 3, username: 'bob',   password: 'password123',   role: 'user',  email: 'bob@vulnbank.local',   balance: 250   },
+];
+
+const transactions = [
+  { id: 1, from_id: 2, to_id: 3, amount: 100, note: 'Lunch' },
+];
+
+let nextUserId = 4;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // VULN-2: Intentionally weak HTTP response headers (Header Audit will flag these)
@@ -45,54 +58,24 @@ app.use(bodyParser.urlencoded({ extended: true }));
 app.use(express.static(path.join(__dirname, 'public')));
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Database setup
-// ─────────────────────────────────────────────────────────────────────────────
-const db = new sqlite3.Database(':memory:');
-db.serialize(() => {
-    db.run(`CREATE TABLE users (
-        id       INTEGER PRIMARY KEY,
-        username TEXT UNIQUE,
-        password TEXT,
-        role     TEXT,
-        email    TEXT,
-        balance  REAL DEFAULT 0
-    )`);
-    db.run(`INSERT INTO users VALUES (1, 'admin',   'supersecret123', 'admin', 'admin@vulnbank.local', 99999)`);
-    db.run(`INSERT INTO users VALUES (2, 'alice',   'alice1234',      'user',  'alice@vulnbank.local',  1500)`);
-    db.run(`INSERT INTO users VALUES (3, 'bob',     'password123',   'user',  'bob@vulnbank.local',    250)`);
-
-    db.run(`CREATE TABLE transactions (
-        id      INTEGER PRIMARY KEY,
-        from_id INTEGER,
-        to_id   INTEGER,
-        amount  REAL,
-        note    TEXT
-    )`);
-    db.run(`INSERT INTO transactions VALUES (1, 2, 3, 100, 'Lunch')`);
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
-// VULN-3: SQL Injection — Login (Semgrep: javascript.express.security.injection.tainted-sql-string)
+// VULN-3: SQL Injection — Login (simulated — Semgrep will still catch the pattern)
 // ─────────────────────────────────────────────────────────────────────────────
 app.post('/api/login', (req, res) => {
     const { username, password } = req.body;
 
-    // INTENTIONALLY VULNERABLE: string concatenation into SQL
+    // INTENTIONALLY VULNERABLE: simulates string concatenation into SQL
     const sql = `SELECT * FROM users WHERE username = '${username}' AND password = '${password}'`;
 
-    db.get(sql, (err, row) => {
-        if (err) {
-            // VULN: leaks internal DB error to the client
-            return res.status(500).json({ error: 'Database error', details: err.message, query: sql });
-        }
-        if (row) {
-            // VULN: algorithm not specified — vulnerable to algorithm confusion attack
-            const token = jwt.sign({ id: row.id, role: row.role }, JWT_SECRET);
-            res.json({ success: true, token, user: row });
-        } else {
-            res.status(401).json({ success: false, message: 'Invalid credentials' });
-        }
-    });
+    // In-memory equivalent (still demonstrates SQLi pattern for SAST)
+    const row = users.find(u => u.username === username && u.password === password);
+
+    if (row) {
+        // VULN: algorithm not specified — vulnerable to algorithm confusion attack
+        const token = jwt.sign({ id: row.id, role: row.role }, JWT_SECRET);
+        res.json({ success: true, token, user: row, debug_query: sql });
+    } else {
+        res.status(401).json({ success: false, message: 'Invalid credentials', debug_query: sql });
+    }
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -101,11 +84,14 @@ app.post('/api/login', (req, res) => {
 app.get('/api/users', (req, res) => {
     const q = req.query.q || '';
 
-    // INTENTIONALLY VULNERABLE
-    db.all(`SELECT id, username, role, email, balance FROM users WHERE username LIKE '%${q}%'`, (err, rows) => {
-        if (err) return res.status(500).json({ error: err.message });
-        res.json({ users: rows });
-    });
+    // INTENTIONALLY VULNERABLE (pattern preserved for SAST detection)
+    const _vuln_sql = `SELECT id, username, role, email, balance FROM users WHERE username LIKE '%${q}%'`;
+
+    const filtered = q
+        ? users.filter(u => u.username.includes(q))
+        : users;
+
+    res.json({ users: filtered.map(u => ({ id: u.id, username: u.username, role: u.role, email: u.email, balance: u.balance })), debug_query: _vuln_sql });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -114,11 +100,11 @@ app.get('/api/users', (req, res) => {
 app.get('/api/transactions/:id', (req, res) => {
     const id = req.params.id;
 
-    // INTENTIONALLY VULNERABLE: param goes straight into SQL
-    db.all(`SELECT * FROM transactions WHERE from_id = ` + id, (err, rows) => {
-        if (err) return res.status(500).json({ error: err.message });
-        res.json({ transactions: rows });
-    });
+    // INTENTIONALLY VULNERABLE: param goes straight into SQL (pattern for SAST)
+    const _vuln_sql = `SELECT * FROM transactions WHERE from_id = ` + id;
+
+    const rows = transactions.filter(t => t.from_id == id);
+    res.json({ transactions: rows, debug_query: _vuln_sql });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -158,10 +144,14 @@ app.post('/api/register', (req, res) => {
     // INTENTIONALLY VULNERABLE: MD5 is cryptographically broken
     const hashed = crypto.createHash('md5').update(password).digest('hex');
 
-    db.run(`INSERT INTO users (username, password, role) VALUES ('${username}', '${hashed}', 'user')`, (err) => {
-        if (err) return res.status(400).json({ error: err.message });
-        res.json({ success: true, hashed_password: hashed });
-    });
+    // INTENTIONALLY VULNERABLE SQL pattern (preserved for SAST detection)
+    const _vuln_sql = `INSERT INTO users (username, password, role) VALUES ('${username}', '${hashed}', 'user')`;
+
+    if (users.find(u => u.username === username)) {
+        return res.status(400).json({ error: 'Username already exists', debug_query: _vuln_sql });
+    }
+    users.push({ id: nextUserId++, username, password: hashed, role: 'user', email: '', balance: 0 });
+    res.json({ success: true, hashed_password: hashed, debug_query: _vuln_sql });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -205,18 +195,26 @@ app.get('/api/internal/metrics', (req, res) => {
     res.json({ requests_per_second: 120, error_rate: 0.02, db_connections: 5 });
 });
 
-app.get('/api/v1/health', (req, res) => res.json({ status: 'ok' }));
+app.get('/api/v1/health', (req, res) => res.json({ status: 'ok', environment: process.env.VERCEL ? 'vercel' : 'local' }));
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Fallback
+// Fallback — serve public/index.html for all unmatched routes
 // ─────────────────────────────────────────────────────────────────────────────
 app.use((req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
-app.listen(PORT, () => {
-    console.log(`\n  VulnBank Demo Target`);
-    console.log(`  ─────────────────────────────────────────`);
-    console.log(`  Running at  http://localhost:${PORT}`);
-    console.log(`  ⚠  Intentionally insecure — demo only!\n`);
-});
+// ─────────────────────────────────────────────────────────────────────────────
+// Start: local dev uses listen(), Vercel uses module.exports
+// ─────────────────────────────────────────────────────────────────────────────
+if (require.main === module) {
+    const PORT = process.env.PORT || 4000;
+    app.listen(PORT, () => {
+        console.log(`\n  VulnBank Demo Target`);
+        console.log(`  ─────────────────────────────────────────`);
+        console.log(`  Running at  http://localhost:${PORT}`);
+        console.log(`  ⚠  Intentionally insecure — demo only!\n`);
+    });
+}
+
+module.exports = app;
