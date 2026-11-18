@@ -25,6 +25,15 @@ const AWS_ACCESS_KEY_ID = 'AKIAIOSFODNN7EXAMPLE';             // gitleaks: aws-a
 const STRIPE_KEY        = 'sk_live_DEMO_FAKE_KEY_DO_NOT_USE_1234567890'; // gitleaks: stripe-secret-key
 
 // ─────────────────────────────────────────────────────────────────────────────
+// VULN-10: BaaS credentials exposed in frontend (BaaS Audit will flag these)
+// Supabase anon key + project URL are intentionally leaked to the browser.
+// ⚠ Replace SUPABASE_ANON_KEY with your real anon key from:
+//   Supabase Dashboard → Project Settings → API → "anon public" key
+// ─────────────────────────────────────────────────────────────────────────────
+const SUPABASE_URL = process.env.SUPABASE_URL || 'https://lbznbjjmlbgcluieupqw.supabase.co';
+const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || 'sb_publishable_aIreM9Lc9_GHBptq7U7JvA_JQDQS1IX';
+
+// ─────────────────────────────────────────────────────────────────────────────
 // In-memory DB (no native modules — works on Vercel serverless)
 // ─────────────────────────────────────────────────────────────────────────────
 const users = [
@@ -196,6 +205,16 @@ app.get('/api/internal/metrics', (req, res) => {
 });
 
 app.get('/api/v1/health', (req, res) => res.json({ status: 'ok', environment: process.env.VERCEL ? 'vercel' : 'local' }));
+
+// ─────────────────────────────────────────────────────────────────────────────
+// VULN-10: Supabase config endpoint — leaks BaaS credentials to any caller
+// ─────────────────────────────────────────────────────────────────────────────
+app.get('/api/config', (req, res) => {
+    res.json({
+        supabaseUrl: SUPABASE_URL,
+        supabaseKey: SUPABASE_ANON_KEY,
+    });
+});
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Fallback — serve public/index.html for all unmatched routes

@@ -20,6 +20,27 @@
 </head>
 <body>
 
+    <!-- VULN-10: Supabase credentials embedded in page source (BaaS Audit target) -->
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+    <script>
+        // These credentials are intentionally exposed in the frontend source.
+        // The BaaS Misconfiguration Audit should detect and flag them.
+        const supabaseUrl = 'https://lbznbjjmlbgcluieupqw.supabase.co';
+        const supabaseKey = 'sb_publishable_aIreM9Lc9_GHBptq7U7JvA_JQDQS1IX';
+
+        // Initialize Supabase client — triggers network requests the scanner intercepts
+        let supabaseClient;
+        try {
+            supabaseClient = supabase.createClient(supabaseUrl, supabaseKey);
+            // Attempt a read to generate a network request to .supabase.co
+            supabaseClient.from('todos').select('*').limit(1).then(({ data, error }) => {
+                console.log('[VulnBank] Supabase query:', error ? error.message : `${(data||[]).length} rows`);
+            });
+        } catch (e) {
+            console.log('[VulnBank] Supabase init skipped:', e.message);
+        }
+    </script>
+
     <div class="container">
         <h1>Admin Portal Login</h1>
         <form id="loginForm">
